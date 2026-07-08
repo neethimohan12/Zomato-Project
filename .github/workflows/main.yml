@@ -106,7 +106,7 @@ jobs:
   
     - name: Run ESLint
       run: |
-        npm  lint
+        npm run lint
 
 # Unit Tests
   
