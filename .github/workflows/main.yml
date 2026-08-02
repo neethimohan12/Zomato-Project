@@ -39,9 +39,16 @@ concurrency:
   
 env:
   NODE_VERSION: "22"
-  IMAGE_NAME: neethimohan/zomato
+
+  # Local Docker image used while building and testing
+  LOCAL_IMAGE_NAME: zomato
+
+  # ECR configuration
+  AWS_REGION: ca-central-1
+  ECR_REPOSITORY: nodejsimage
+
+  # Every commit gets a unique image tag
   IMAGE_TAG: ${{ github.sha }}
-  REPO: nodejsimage
  
 jobs:
 
@@ -146,7 +153,7 @@ jobs:
   
 
   security:
-    name: Security & Docker Validation
+    name: Security & ECR Push
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 30
@@ -241,26 +248,23 @@ jobs:
           ${{ runner.os }}-buildx-
 
   
-# Build Docker Image
-  
-
+    # Build Docker Image
     - name: Build Docker Image
       uses: docker/build-push-action@v6
       with:
         context: .
         file: Dockerfile
         push: false
+        load: true
 
         tags: |
-          ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          ${{ env.IMAGE_NAME }}:latest
+          ${{ env.LOCAL_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          ${{ env.LOCAL_IMAGE_NAME }}:latest
 
         cache-from: type=local,src=/tmp/.buildx-cache
         cache-to: type=local,dest=/tmp/.buildx-cache-new
 
         provenance: false
-
-        load: true
 
         labels: |
           org.opencontainers.image.title=Zomato
@@ -269,69 +273,76 @@ jobs:
           org.opencontainers.image.revision=${{ github.sha }}
           org.opencontainers.image.created=${{ github.run_id }}
 
-  
-# Move Docker Cache
-  
+    # Move Docker Cache
     - name: Update Docker Cache
       run: |
         rm -rf /tmp/.buildx-cache
         mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
-# Verify Docker Image
-  
-
+    # Verify Docker Image
     - name: Verify Docker Image
       run: |
         docker images
 
         docker image inspect \
-        ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          ${{ env.LOCAL_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
-  
-# Validate Image Size
-
+    # Validate Image Size
     - name: Validate Image Size
       run: docker images
 
-  #  Login Securely
-    - name: Login to DockerHub
-      uses: docker/login-action@v4
+    # Configure AWS credentials
+    - name: Configure AWS Credentials
+      if: github.event_name == 'push'
+      uses: aws-actions/configure-aws-credentials@v6.1.0
       with:
-        username: ${{ secrets.DOCKER_USER }}
-        password: ${{ secrets.DOCKER_TOKEN }}
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-#  Push Image
-    - name: Push Docker Image
+    # Login to Amazon ECR
+    - name: Login to Amazon ECR
+      if: github.event_name == 'push'
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    # Tag local image with ECR repository URI
+    - name: Tag Image for Amazon ECR
+      if: github.event_name == 'push'
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
       run: |
-        docker tag ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} ${{ secrets.DOCKER_USER }}/${{ env.REPO }}:${{ env.IMAGE_TAG}}
-        docker push ${{ secrets.DOCKER_USER }}/${{ env.REPO }}:${{ env.IMAGE_TAG }}
+        docker tag \
+          ${{ env.LOCAL_IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+          $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
-# Verify Container Starts
-  
-    - name: Smoke Test Container
+        docker tag \
+          ${{ env.LOCAL_IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+          $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+        echo "Images after ECR tagging:"
+        docker images
+
+    # Push image to Amazon ECR
+    - name: Push Image to Amazon ECR
+      if: github.event_name == 'push'
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
       run: |
+        docker push \
+          $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
-        docker run -d \
-        --name zomato-test \
-        -p 3000:3000 \
-        ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        docker push \
+          $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
 
-        sleep 20
+        echo "Image pushed successfully:"
+        echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+        echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
 
-        docker ps
-
-        docker logs zomato-test
-
-  
-# Cleanup Test Container
-  
-
+    # Cleanup test container
     - name: Cleanup
       if: always()
       run: |
         docker rm -f zomato-test || true
-
-
-
 
 
