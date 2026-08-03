@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: cont-1
-          image: shaikmustafa77/ccitrepo:zomato
+          image: 564395526804.dkr.ecr.ca-central-1.amazonaws.com/nodejsimage:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
             
