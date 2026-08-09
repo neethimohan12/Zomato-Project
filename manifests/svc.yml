@@ -12,6 +12,6 @@ spec:
     app: zomato
 
   ports:
-    - protocol: TCP
+    - protocol: TCP 
       port: 80
       targetPort: 3000
