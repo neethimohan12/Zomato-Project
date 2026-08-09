@@ -1,0 +1,264 @@
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Node.js
+  nodeVersion: '22.x'
+
+  # SonarQube
+  sonarServiceConnection: 'sonarqservice'
+  sonarProjectKey: 'zomato-app'
+  sonarProjectName: 'zomato-app'
+
+  # Azure Resource Manager Service Connection
+  azureServiceConnection: 'azure-aks-service'
+
+  # Azure Container Registry
+  acrName: 'zomatoccr'
+  acrLoginServer: 'zomatoccr.azurecr.io'
+
+  # Docker image
+  imageRepository: 'azurezomatoproject'
+  imageTag: '$(Build.BuildId)'
+
+
+steps:
+
+# ==========================================================
+# 1. CHECKOUT SOURCE CODE
+# ==========================================================
+
+- checkout: self
+  displayName: 'Checkout Source Code'
+
+
+# ==========================================================
+# 2. PREPARE SONARQUBE ANALYSIS
+# ==========================================================
+
+- task: SonarQubePrepare@7
+  displayName: 'Prepare SonarQube Analysis'
+  inputs:
+    SonarQube: '$(sonarServiceConnection)'
+    scannerMode: 'cli'
+    configMode: 'manual'
+    cliProjectKey: '$(sonarProjectKey)'
+    cliProjectName: '$(sonarProjectName)'
+    cliSources: 'src'
+
+
+# ==========================================================
+# 3. INSTALL NODE.JS
+# ==========================================================
+
+- task: NodeTool@0
+  displayName: 'Install Node.js'
+  inputs:
+    versionSpec: '$(nodeVersion)'
+
+
+# ==========================================================
+# 4. CHECK NODE/NPM VERSION
+# ==========================================================
+
+- script: |
+    node --version
+    npm --version
+  displayName: 'Verify Node.js and npm'
+
+
+# ==========================================================
+# 5. INSTALL APPLICATION DEPENDENCIES
+# ==========================================================
+
+- script: |
+    npm ci
+  displayName: 'Install Dependencies'
+
+
+# ==========================================================
+# 6. RUN ESLINT
+# ==========================================================
+
+- script: |
+    npm run lint
+  displayName: 'Run ESLint'
+  continueOnError: true
+
+
+# ==========================================================
+# 7. RUN UNIT TESTS
+# ==========================================================
+
+- script: |
+    CI=true npm test -- --watchAll=false
+  displayName: 'Run Unit Tests'
+  continueOnError: true
+
+
+# ==========================================================
+# 8. BUILD REACT APPLICATION
+# ==========================================================
+
+- script: |
+    npm run build
+  displayName: 'Build React Application'
+
+
+# ==========================================================
+# 9. RUN SONARQUBE ANALYSIS
+# ==========================================================
+
+- task: SonarQubeAnalyze@7
+  displayName: 'Run SonarQube Analysis'
+
+
+# ==========================================================
+# 10. PUBLISH SONARQUBE QUALITY GATE
+# ==========================================================
+
+- task: SonarQubePublish@7
+  displayName: 'Publish SonarQube Results'
+  inputs:
+    pollingTimeoutSec: '300'
+
+
+# ==========================================================
+# 11. LOGIN TO AZURE CONTAINER REGISTRY
+# ==========================================================
+
+- task: AzureCLI@2
+  displayName: 'Login to ACR'
+  inputs:
+    azureSubscription: '$(azureServiceConnection)'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo "Logging into Azure Container Registry..."
+
+      az acr login \
+        --name $(acrName)
+
+      echo "Successfully logged into $(acrLoginServer)"
+
+
+# ==========================================================
+# 12. BUILD DOCKER IMAGE
+# ==========================================================
+
+- script: |
+    echo "Building Docker image..."
+
+    docker build \
+      -t $(acrLoginServer)/$(imageRepository):$(imageTag) \
+      -t $(acrLoginServer)/$(imageRepository):latest \
+      .
+
+    echo "Docker images:"
+    docker images
+  displayName: 'Build Docker Image'
+
+
+# ==========================================================
+# 13. INSTALL TRIVY
+# ==========================================================
+
+- script: |
+    sudo apt-get update
+
+    sudo apt-get install -y \
+      wget \
+      apt-transport-https \
+      gnupg
+
+    wget -qO - https://get.trivy.dev/deb/public.key \
+      | gpg --dearmor \
+      | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+    echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://get.trivy.dev/deb generic main" \
+      | sudo tee /etc/apt/sources.list.d/trivy.list
+
+    sudo apt-get update
+
+    sudo apt-get install -y trivy
+
+    trivy --version
+  displayName: 'Install Trivy'
+
+
+# ==========================================================
+# 14. TRIVY FILESYSTEM SCAN
+# ==========================================================
+
+- script: |
+    trivy fs \
+      --severity HIGH,CRITICAL \
+      --ignore-unfixed \
+      .
+  displayName: 'Trivy Filesystem Scan'
+  continueOnError: true
+
+
+# ==========================================================
+# 15. TRIVY DOCKER IMAGE SCAN
+# ==========================================================
+
+- script: |
+    trivy image \
+      --severity HIGH,CRITICAL \
+      --ignore-unfixed \
+      $(acrLoginServer)/$(imageRepository):$(imageTag)
+  displayName: 'Trivy Vulnerability Scan'
+  continueOnError: true
+
+
+# ==========================================================
+# 16. PUSH VERSIONED DOCKER IMAGE TO ACR
+# ==========================================================
+
+- script: |
+    echo "Pushing image tag $(imageTag)..."
+
+    docker push \
+      $(acrLoginServer)/$(imageRepository):$(imageTag)
+  displayName: 'Push Versioned Image to ACR'
+
+
+# ==========================================================
+# 17. PUSH LATEST IMAGE TO ACR
+# ==========================================================
+
+- script: |
+    echo "Pushing latest image..."
+
+    docker push \
+      $(acrLoginServer)/$(imageRepository):latest
+  displayName: 'Push Latest Image to ACR'
+
+
+# ==========================================================
+# 18. VERIFY IMAGE IN ACR
+# ==========================================================
+
+- task: AzureCLI@2
+  displayName: 'Verify Image in ACR'
+  inputs:
+    azureSubscription: '$(azureServiceConnection)'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo "Repositories:"
+      az acr repository list \
+        --name $(acrName) \
+        --output table
+
+      echo "Tags:"
+      az acr repository show-tags \
+        --name $(acrName) \
+        --repository $(imageRepository) \
+        --output table
