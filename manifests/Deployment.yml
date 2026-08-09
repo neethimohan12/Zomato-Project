@@ -15,8 +15,33 @@ spec:
     spec:
       containers:
         - name: cont-1
-          image: 564395526804.dkr.ecr.ca-central-1.amazonaws.com/nodejsimage:latest
+          image: zomatoccr.azurecr.io/azurezomatoproject:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
+
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+
+
             
